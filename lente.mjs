@@ -7,7 +7,7 @@
    cosa la fa un browser vero, ogni ora, per tutte le scuole che hanno detto
    si'. Gira su GitHub Actions (gratis) e scrive in Supabase.
 
-   Per ogni riga di `stazioni` con tipo "pagina" e attiva:
+   Per ogni riga di `stazioni` con tipo "pagina" (accesa o spenta):
    1. robots.txt: se vieta i lettori automatici, si salta e si scrive perche'.
    2. apre config.url, aspetta che la pagina abbia chiesto i suoi dati,
       cattura ogni risposta JSON;
@@ -132,7 +132,10 @@ async function leggiPagina(browser, st){
 }
 
 async function main(){
-  const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config&tipo=eq.pagina&attiva=is.true`, { headers: H });
+  /* si leggono TUTTE le pagine affidate, accese o spente: leggere non pubblica
+     niente, e' l'interruttore "accesa" (Plancia) che decide cosa vede l'utente.
+     Cosi' una pagina appena affidata si prova prima di accenderla. */
+  const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config&tipo=eq.pagina`, { headers: H });
   if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
   const righe = await r.json();
   console.log(`Lente automatica: ${righe.length} pagine da leggere`);
