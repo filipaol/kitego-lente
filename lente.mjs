@@ -98,15 +98,22 @@ async function leggiPagina(browser, st){
   const c = st.config || {}, url = c.url || st.link;
   if (!/^https?:\/\//.test(url || "")) return { errore:"manca l'indirizzo della pagina" };
   const rb = await robotsPermette(url); if (!rb.ok) return { errore: rb.motivo };
-  const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1200, height: 900 }, locale: "it-IT" });
+  /* Si presenta come un Chrome normale: alcuni siti, davanti a un browser
+     "automatico", non caricano i dati. La firma KITEGO resta nel registro. */
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 }, locale: "it-IT",
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" });
   const page = await ctx.newPage();
-  const risposte = [];
+  const risposte = [], viste = [];
   page.on("response", async r => {
     try{
-      const ct = r.headers()["content-type"] || "";
-      if (!/json|javascript/i.test(ct) && !/\.json(\?|$)/.test(r.url())) return;
-      const testo = await r.text(); if (!testo || testo.length > 800000) return;
-      const t = testo.replace(/^[^{[]*/, "").replace(/[^}\]]*$/, "");
+      const tipo = r.request().resourceType(), ct = (r.headers()["content-type"] || "").split(";")[0];
+      if (!["xhr", "fetch", "document", "script", "other"].includes(tipo)) return;
+      let testo = null; try{ testo = await r.text(); }catch(e){}
+      const n = testo ? testo.length : 0;
+      if (tipo === "xhr" || tipo === "fetch") viste.push(`${tipo} ${ct} ${n}b ${(()=>{ try{ const x = new URL(r.url()); return x.origin + x.pathname; }catch(e){ return "?"; } })()}`);
+      if (!testo || n > 800000) return;
+      /* qualunque etichetta abbia, se il corpo e' JSON si legge */
+      const t = testo.trim(); if (!/^[{[]/.test(t)) return;
       try{ risposte.push({ url: r.url(), d: JSON.parse(t) }); }catch(e){}
     }catch(e){}
   });
@@ -121,7 +128,9 @@ async function leggiPagina(browser, st){
     const trova = () => { for (const r of risposte.slice().reverse()){ const v = ventoDaJson(r.d); if (v && v.vento != null) return { ...v, fonte: r.url }; } return null; };
     while (Date.now() < limite){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
     const senzaCodici = u => { try{ const x = new URL(u); return x.origin + x.pathname; }catch(e){ return String(u).slice(0, 80); } };
-    console.log(`    risposte dati viste (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
+    console.log(`    risposte dati lette (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
+    console.log(`    richieste della pagina (${viste.length}):\n      ${viste.slice(0, 25).join("\n      ") || "nessuna"}`);
+    if (!esito){ const testo = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 400) : ""); console.log(`    inizio del testo della pagina: ${JSON.stringify(testo)}`); }
     if (!esito){
       const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
       const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
