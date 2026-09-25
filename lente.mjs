@@ -69,7 +69,14 @@ function foglie(obj, via = "", out = [], prof = 0){
 const num = v => { if (typeof v === "number") return v; if (typeof v === "string"){ const m = v.replace(",", ".").match(/-?\d+(\.\d+)?/); return m ? +m[0] : null; } return null; };
 const nonMisura = via => /(_id|Id)$|setting|\bunit\b|units|config|option|threshold|alarm/i.test(via);
 
+/* ECOWITT: i campi si chiamano "windspeedmph" qualunque unita' mostrino. L'unita'
+   vera sta in setting/info -> unit_setting_info.windspeed_id (25/9, Siponto:
+   la pagina diceva 5,6 nodi, la Lente 4,9 perche' convertiva da miglia). */
+const ECOWITT_UNITA = { 6:"kmh", 7:"ms", 8:"kn", 9:"mph" };
+let unitaEcowitt = null;
 function ventoDaJson(d){
+  try{ const id = d && d.data && d.data.unit_setting_info && d.data.unit_setting_info.windspeed_id;
+       if (id != null && ECOWITT_UNITA[+id]) unitaEcowitt = ECOWITT_UNITA[+id]; }catch(e){}
   const F = foglie(d).filter(f => num(f.v) != null);
   const k = f => f.via.toLowerCase();
   const vento = F.find(f => /(wind|vento)[^.]*(speed|avg|media|vel|kn|kt|ms|kmh)|windspeed|wspd|wind_?kn|vel_?vento/.test(k(f)) && !/gust|raffic|max|dir|min/.test(k(f)) && !nonMisura(f.via))
@@ -80,8 +87,10 @@ function ventoDaJson(d){
   const dir = F.find(f => /(wind_?|vento_?)?(dir|direction|direzione)(\.value)?$|wdir|winddir|bearing/.test(k(f)) && num(f.v) >= 0 && num(f.v) <= 360 && !nonMisura(f.via));
   /* l'unita': accanto al valore ("unit": "km/h") o nel nome del campo */
   const uAccanto = vento.padre && typeof vento.padre === "object" ? unitaDa(vento.padre.unit || vento.padre.units || vento.padre.unita) : null;
-  const uNome = unitaDa(vento.k);
-  return { campo: vento.via, vento: num(vento.v), raffica: raffica ? num(raffica.v) : null, dir: dir ? Math.round(num(dir.v)) : null, unita: uAccanto || uNome || null };
+  const eco = /windspeedmph|windgustmph/i.test(vento.via);
+  const uNome = eco ? null : unitaDa(vento.k);   /* per Ecowitt il nome mente */
+  return { campo: vento.via, vento: num(vento.v), raffica: raffica ? num(raffica.v) : null, dir: dir ? Math.round(num(dir.v)) : null,
+           unita: uAccanto || (eco ? unitaEcowitt : null) || uNome || null };
 }
 
 /* ---------- il testo della pagina, se i dati non bastano ---------- */
@@ -119,7 +128,18 @@ async function leggiPagina(browser, st){
   });
   let esito = null;
   try{
+    unitaEcowitt = null;
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    /* IL BANNER DEI COOKIE (Resia, 25/9): la pagina resta ferma su "scelte di
+       consenso" e i dati non partono. Si preme il tasto di consenso, se c'e'. */
+    const consenso = async () => {
+      for (const t of ["Accetta tutto", "Accetta tutti", "Accetta", "Accept all", "Accept", "Consenti tutti", "Consenti", "OK", "Ho capito", "Chiudi"]){
+        try{ const b = page.getByRole("button", { name: t, exact: false }).first(); if (await b.isVisible({ timeout: 800 })){ await b.click({ timeout: 2000 }); await page.waitForTimeout(1500); return t; } }catch(e){}
+      }
+      return null;
+    };
+    const premuto = await consenso();
+    if (premuto) console.log(`    premuto il consenso: "${premuto}"`);
     /* LA PAGINA CHIEDE I NUMERI IN PIU' TEMPI (Ecowitt: prima le impostazioni,
        poi i dati). Si aspetta fino a 30 secondi, e ci si ferma appena una
        risposta ha dentro il vento. Primo giro vero (25/9, Siponto): con 6
@@ -131,10 +151,27 @@ async function leggiPagina(browser, st){
     console.log(`    risposte dati lette (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
     console.log(`    richieste della pagina (${viste.length}):\n      ${viste.slice(0, 25).join("\n      ") || "nessuna"}`);
     if (!esito){ const testo = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 400) : ""); console.log(`    inizio del testo della pagina: ${JSON.stringify(testo)}`); }
+    /* LA HOME NON E' LA STAZIONE (Alghero, 25/9): zero richieste, ma nel menu
+       c'e' "STAZIONE METEO". Si segue quel link, una volta, e si riprova. */
+    if (!esito && !viste.length){
+      const link = await page.evaluate(() => { const L = [...document.querySelectorAll("a[href]")];
+        const t = L.find(a => /stazione\s*meteo|meteo\s*live|vento\s*(live|in diretta|reale)|live\s*wind|webcam/i.test(a.textContent || "") || /meteo|wind|webcam|stazione/i.test(a.getAttribute("href") || ""));
+        return t ? t.href : null; });
+      if (link && link !== url){
+        console.log(`    seguo il link della stazione: ${link}`);
+        await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+        await consenso();
+        const limite2 = Date.now() + 25000;
+        while (Date.now() < limite2){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
+        if (esito) esito.fonte = esito.fonte || link;
+        if (!esito){ const t2 = await page.evaluate(() => document.body ? document.body.innerText : ""); const v2 = ventoDaTesto(t2); if (v2) esito = { ...v2, fonte: link }; }
+      }
+    }
     if (!esito){
       const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
       const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
     }
+    if (unitaEcowitt) console.log(`    unita' Ecowitt dalla pagina: ${unitaEcowitt}`);
     if (!esito) return { errore:"la pagina si apre, ma dentro non trovo il vento (" + risposte.length + " risposte dati viste)" };
     const unita = c.unita || esito.unita || "kn";
     const kn = +aKn(esito.vento, unita).toFixed(1);
