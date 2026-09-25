@@ -1,0 +1,9 @@
+{
+  "name": "kitego-lente-automatica",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "KITEGO - la Lente automatica: legge ogni ora le pagine delle centraline delle scuole con un browser vero",
+  "scripts": { "start": "node lente.mjs" },
+  "dependencies": { "playwright": "1.49.1" }
+}
