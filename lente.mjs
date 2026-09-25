@@ -113,11 +113,15 @@ async function leggiPagina(browser, st){
   let esito = null;
   try{
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(6000);                          /* il tempo di chiedere i dati */
-    if (c.attesa_ms) await page.waitForTimeout(Math.min(20000, +c.attesa_ms || 0));
-    for (const r of risposte.slice().reverse()){             /* la risposta piu' recente vince */
-      const v = ventoDaJson(r.d); if (v && v.vento != null){ esito = { ...v, fonte: r.url }; break; }
-    }
+    /* LA PAGINA CHIEDE I NUMERI IN PIU' TEMPI (Ecowitt: prima le impostazioni,
+       poi i dati). Si aspetta fino a 30 secondi, e ci si ferma appena una
+       risposta ha dentro il vento. Primo giro vero (25/9, Siponto): con 6
+       secondi fissi si vedeva una risposta sola, senza vento. */
+    const limite = Date.now() + Math.min(45000, 30000 + (+c.attesa_ms || 0));
+    const trova = () => { for (const r of risposte.slice().reverse()){ const v = ventoDaJson(r.d); if (v && v.vento != null) return { ...v, fonte: r.url }; } return null; };
+    while (Date.now() < limite){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
+    const senzaCodici = u => { try{ const x = new URL(u); return x.origin + x.pathname; }catch(e){ return String(u).slice(0, 80); } };
+    console.log(`    risposte dati viste (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
     if (!esito){
       const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
       const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
