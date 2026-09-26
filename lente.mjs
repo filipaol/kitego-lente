@@ -191,10 +191,15 @@ async function main(){
   /* si leggono TUTTE le pagine affidate, accese o spente: leggere non pubblica
      niente, e' l'interruttore "accesa" (Plancia) che decide cosa vede l'utente.
      Cosi' una pagina appena affidata si prova prima di accenderla. */
-  const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config&tipo=eq.pagina`, { headers: H });
+  /* OGNI 20 MINUTI, MA CON GIUDIZIO (26/9): allo scoccare dell'ora si leggono
+     tutte le pagine (anche le spente: servono alla taratura, una volta l'ora
+     basta); negli altri giri solo le ACCESE, quelle che gli utenti vedono,
+     cosi' il "misurato adesso" non e' mai piu' vecchio di 20 minuti. */
+  const giroPieno = new Date().getUTCMinutes() < 15;
+  const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config,attiva&tipo=eq.pagina${giroPieno ? "" : "&attiva=is.true"}`, { headers: H });
   if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
   const righe = await r.json();
-  console.log(`Lente automatica: ${righe.length} pagine da leggere`);
+  console.log(`Lente automatica: ${righe.length} pagine da leggere (${giroPieno ? "giro pieno, anche le spente" : "giro leggero, solo le accese"})`);
   if (!righe.length) return;
   const browser = await chromium.launch();
   const ora = new Date().toISOString();
