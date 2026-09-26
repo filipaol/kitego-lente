@@ -107,8 +107,15 @@ function ventoDaTesto(t){
   const m = s.match(/(?:vento|wind|speed|velocit[aà])[^0-9]{0,40}(\d{1,2}(?:[.,]\d)?)\s*(kn|kts?|nodi|km\/?h|m\/?s|mph)\b/i)
     || s.match(/(\d{1,2}(?:[.,]\d)?)\s*(kn|kts|nodi)\b/i);
   if (!m) return null;
-  const g = s.match(/(?:raffic[ae]|gust)[^0-9]{0,30}(\d{1,2}(?:[.,]\d)?)/i);
-  return { campo:"testo della pagina", vento: +m[1].replace(",", "."), raffica: g ? +g[1].replace(",", ".") : null, dir: null, unita: unitaDa(m[2]) || "kn" };
+  /* 55.520: la raffica e' quella degli ultimi minuti, MAI il massimo del giorno.
+     LNI Ostia non scrive "raffica": scrive "Max. 15 min.: 11.3 kt" e "Max oggi: ...". */
+  const breve = s.match(/max\.?\s*(?:ultimi\s*)?(?:5|10|15)\s*min\.?[^0-9]{0,12}(\d{1,2}(?:[.,]\d)?)/i);
+  let g = breve;
+  if (!g) for (const x of s.matchAll(/(?:raffic[ae]|gust)[^0-9]{0,30}(\d{1,2}(?:[.,]\d)?)/gi)){
+    const prima = s.slice(Math.max(0, x.index - 25), x.index + x[0].length);
+    if (!/oggi|today|giorn|daily|record|60\s*min|ora\b|hour/i.test(prima)){ g = x; break; }
+  }
+  return { campo: breve ? "testo della pagina (max 15 min)" : "testo della pagina", vento: +m[1].replace(",", "."), raffica: g ? +g[1].replace(",", ".") : null, dir: null, unita: unitaDa(m[2]) || "kn" };
 }
 
 async function leggiPagina(browser, st){
