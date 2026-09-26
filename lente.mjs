@@ -73,10 +73,9 @@ const nonMisura = via => /(_id|Id)$|setting|\bunit\b|units|config|option|thresho
    vera sta in setting/info -> unit_setting_info.windspeed_id (25/9, Siponto:
    la pagina diceva 5,6 nodi, la Lente 4,9 perche' convertiva da miglia). */
 const ECOWITT_UNITA = { 6:"kmh", 7:"ms", 8:"kn", 9:"mph" };
-let unitaEcowitt = null;
-function ventoDaJson(d){
+function ventoDaJson(d, eco = {}){
   try{ const id = d && d.data && d.data.unit_setting_info && d.data.unit_setting_info.windspeed_id;
-       if (id != null && ECOWITT_UNITA[+id]) unitaEcowitt = ECOWITT_UNITA[+id]; }catch(e){}
+       if (id != null && ECOWITT_UNITA[+id]) eco.unita = ECOWITT_UNITA[+id]; }catch(e){}
   const F = foglie(d).filter(f => num(f.v) != null);
   const k = f => f.via.toLowerCase();
   const vento = F.find(f => /(wind|vento)[^.]*(speed|avg|media|vel|kn|kt|ms|kmh)|windspeed|wspd|wind_?kn|vel_?vento/.test(k(f)) && !/gust|raffic|max|dir|min/.test(k(f)) && !nonMisura(f.via))
@@ -87,10 +86,10 @@ function ventoDaJson(d){
   const dir = F.find(f => /(wind_?|vento_?)?(dir|direction|direzione)(\.value)?$|wdir|winddir|bearing/.test(k(f)) && num(f.v) >= 0 && num(f.v) <= 360 && !nonMisura(f.via));
   /* l'unita': accanto al valore ("unit": "km/h") o nel nome del campo */
   const uAccanto = vento.padre && typeof vento.padre === "object" ? unitaDa(vento.padre.unit || vento.padre.units || vento.padre.unita) : null;
-  const eco = /windspeedmph|windgustmph/i.test(vento.via);
-  const uNome = eco ? null : unitaDa(vento.k);   /* per Ecowitt il nome mente */
+  const ecoNome = /windspeedmph|windgustmph/i.test(vento.via);
+  const uNome = ecoNome ? null : unitaDa(vento.k);   /* per Ecowitt il nome mente */
   return { campo: vento.via, vento: num(vento.v), raffica: raffica ? num(raffica.v) : null, dir: dir ? Math.round(num(dir.v)) : null,
-           unita: uAccanto || (eco ? unitaEcowitt : null) || uNome || null };
+           unita: uAccanto || (ecoNome ? eco.unita : null) || uNome || null };
 }
 
 /* ---------- il testo della pagina, se i dati non bastano ---------- */
@@ -134,7 +133,7 @@ async function leggiPagina(browser, st){
   });
   let esito = null;
   try{
-    unitaEcowitt = null;
+    const eco = { unita: null };   /* l'unita' Ecowitt di QUESTA pagina (tre pagine in parallelo) */
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     /* IL BANNER DEI COOKIE (Resia, 25/9): la pagina resta ferma su "scelte di
        consenso" e i dati non partono. Si preme il tasto di consenso, se c'e'. */
@@ -151,7 +150,7 @@ async function leggiPagina(browser, st){
        risposta ha dentro il vento. Primo giro vero (25/9, Siponto): con 6
        secondi fissi si vedeva una risposta sola, senza vento. */
     const limite = Date.now() + Math.min(45000, 30000 + (+c.attesa_ms || 0));
-    const trova = () => { for (const r of risposte.slice().reverse()){ const v = ventoDaJson(r.d); if (v && v.vento != null) return { ...v, fonte: r.url }; } return null; };
+    const trova = () => { for (const r of risposte.slice().reverse()){ const v = ventoDaJson(r.d, eco); if (v && v.vento != null) return { ...v, fonte: r.url }; } return null; };
     while (Date.now() < limite){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
     const senzaCodici = u => { try{ const x = new URL(u); return x.origin + x.pathname; }catch(e){ return String(u).slice(0, 80); } };
     console.log(`    risposte dati lette (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
@@ -177,7 +176,7 @@ async function leggiPagina(browser, st){
       const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
       const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
     }
-    if (unitaEcowitt) console.log(`    unita' Ecowitt dalla pagina: ${unitaEcowitt}`);
+    if (eco.unita) console.log(`    unita' Ecowitt dalla pagina: ${eco.unita}`);
     if (!esito) return { errore:"la pagina si apre, ma dentro non trovo il vento (" + risposte.length + " risposte dati viste)" };
     const unita = c.unita || esito.unita || "kn";
     const kn = +aKn(esito.vento, unita).toFixed(1);
@@ -204,7 +203,13 @@ async function main(){
   const browser = await chromium.launch();
   const ora = new Date().toISOString();
   let ok = 0;
-  for (const st of righe){
+  /* TRE PAGINE ALLA VOLTA (26/9): con 18 pagine, una dopo l'altra, il giro
+     superava i 12 minuti e GitHub lo fermava a meta' (le prime lette, le
+     altre "non e' ancora passata"). Tre contesti separati nel browser: ogni
+     pagina ha le sue risposte, nessuna vede quelle delle altre. */
+  let i = 0;
+  const uno = async () => { while (i < righe.length){ const st = righe[i++]; await leggiUna(st); } };
+  const leggiUna = async st => {
     const e = await leggiPagina(browser, st);
     const riga = { spot_id: st.spot_id, letta: ora, quando: e.errore ? null : ora, kn: e.kn ?? null, raffica_kn: e.raffica_kn ?? null, dir: e.dir ?? null,
                    fonte: e.fonte || null, campo: e.campo || null, unita: e.unita || null, errore: e.errore || null };
@@ -213,7 +218,8 @@ async function main(){
     const corpo = e.errore ? { spot_id: st.spot_id, letta: ora, errore: e.errore } : riga;
     const w = await fetch(`${SB}/rest/v1/pagina_letture?on_conflict=spot_id`, { method:"POST", headers: { ...H, Prefer:"resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(corpo) });
     if (!w.ok) console.log(`    (non salvata: Supabase ${w.status} ${(await w.text()).slice(0, 120)})`);
-  }
+  };
+  await Promise.all([uno(), uno(), uno()]);
   await browser.close();
   console.log(`fatto: ${ok} su ${righe.length}`);
 }
