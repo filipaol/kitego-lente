@@ -96,6 +96,12 @@ function ventoDaJson(d){
 /* ---------- il testo della pagina, se i dati non bastano ---------- */
 function ventoDaTesto(t){
   const s = String(t || "").replace(/\s+/g, " ");
+  /* "11/11 kn", "media / raffica 11/13 kn" (Meteo Grado, 26/9): media e raffica insieme */
+  const mr = s.match(/(\d{1,2}(?:[.,]\d)?)\s*\/\s*(\d{1,2}(?:[.,]\d)?)\s*(kn|kts?|nodi|km\/?h|m\/?s|mph)\b/i);
+  if (mr){
+    const g = s.match(/(?:tendenza|direzione|direction|dir)[^0-9]{0,30}\((\d{1,3})\s*[°o]\)|(\d{1,3})\s*°/i);
+    return { campo:"testo della pagina (media/raffica)", vento: +mr[1].replace(",", "."), raffica: +mr[2].replace(",", "."), dir: g ? +(g[1] || g[2]) : null, unita: unitaDa(mr[3]) || "kn" };
+  }
   const m = s.match(/(?:vento|wind|speed|velocit[aà])[^0-9]{0,40}(\d{1,2}(?:[.,]\d)?)\s*(kn|kts?|nodi|km\/?h|m\/?s|mph)\b/i)
     || s.match(/(\d{1,2}(?:[.,]\d)?)\s*(kn|kts|nodi)\b/i);
   if (!m) return null;
