@@ -231,7 +231,11 @@ async function main(){
      basta); negli altri giri solo le ACCESE, quelle che gli utenti vedono,
      cosi' il "misurato adesso" non e' mai piu' vecchio di 20 minuti. */
   /* un giro lanciato a mano (Run workflow) e' sempre pieno: chi lo lancia vuole vedere tutto */
-  const giroPieno = process.env.GITHUB_EVENT_NAME === "workflow_dispatch" || new Date().getUTCMinutes() < 15;
+  /* 26/9 sera: GitHub fa partire i giri programmati in ritardo (anche 20 minuti):
+     il giro "allo scoccare dell'ora" (minuto < 15) saltava, e le pagine spente
+     restavano ferme per ore ("dato delle 14:17, di 214 min fa"). Il repo e'
+     pubblico, i minuti di GitHub non costano: ogni giro legge tutte le pagine. */
+  const giroPieno = true;
   const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config,attiva&tipo=eq.pagina${giroPieno ? "" : "&attiva=is.true"}`, { headers: H });
   if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
   const righe = await r.json();
