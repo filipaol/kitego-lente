@@ -1,227 +1,122 @@
 /* ==========================================================================
-   KITEGO — LA LENTE AUTOMATICA (55.506)
-
-   Le pagine delle centraline che si costruiscono i numeri nel browser
-   (Ecowitt in condivisione, siti fatti in casa, widget) dal server non si
-   leggono. La Lente nell'app le legge a mano, una per volta: qui la stessa
-   cosa la fa un browser vero, ogni ora, per tutte le scuole che hanno detto
-   si'. Gira su GitHub Actions (gratis) e scrive in Supabase.
-
-   Per ogni riga di `stazioni` con tipo "pagina" (accesa o spenta):
-   1. robots.txt: se vieta i lettori automatici, si salta e si scrive perche'.
-   2. apre config.url, aspetta che la pagina abbia chiesto i suoi dati,
-      cattura ogni risposta JSON;
-   3. cerca il vento con le stesse regole della Lente (campi wind/vento,
-      mai gust/max/dir, mai *_id, setting, unit, config);
-   4. l'unita': config.unita se c'e', altrimenti quella che la pagina dice
-      accanto al valore ("unit": "km/h"), altrimenti nodi;
-   5. se nei dati non c'e', legge il testo della pagina: "12.3 kn", "12 nodi",
-      "23 km/h" accanto a "vento";
-   6. upsert in `pagina_letture` (spot_id, quando, kn, raffica_kn, dir, ...).
+   LA LENTE KITEGO (55.489)
+   Molte pagine (Panoramicams, siti fatti con WordPress e plugin) costruiscono
+   il video e i numeri del vento DOPO l'apertura, con i loro programmi: nel
+   codice della pagina non c'e' niente da leggere, e la prova dal server non
+   trova nulla. La Lente e' un segnalibro: si apre la pagina nel browser, la
+   si lascia caricare (video partito, numeri comparsi), si preme la Lente.
+   Guarda quello che il browser ha davvero caricato:
+     - i riquadri (player) che il sito ha creato;
+     - i flussi video e le immagini che si aggiornano;
+     - i link delle centraline note (Ecowitt, Holfuy, WeatherLink, ...);
+     - i dati che la pagina si e' fatta mandare: se dentro c'e' il vento,
+       prepara la "ricetta" per leggerlo (indirizzo, campi, unita').
+   Poi mostra un pannello e copia tutto per KITEGO. Non salva niente e non
+   manda niente da nessuna parte: si incolla a mano nella scheda.
    ========================================================================== */
-import { chromium } from "playwright";
+(async () => {
+  try { if (window.__kitegoLente) window.__kitegoLente.remove(); } catch (e) {}
+  const T = { lente: 1, pagina: location.href, titolo: String(document.title || "").slice(0, 120), quando: new Date().toISOString(),
+    player: [], immagini: [], video: [], stazioni: [], dati: [], ricette: [] };
+  const add = (a, x) => { if (x && !a.includes(x) && a.length < 12) a.push(x); };
+  /* 55.501: sulla pagina di Panoramicams la Lente elencava come "player" dodici riquadri della
+     pubblicita' (criteo, pubmatic, smartadserver...) e la pagina stessa */
+  const NO = /google\.com\/maps|maps\.google|googletagmanager|google-analytics|doubleclick|googlesyndication|adservice|facebook\.com\/(plugins|tr)|recaptcha|about:blank|hotjar|clarity\.ms|cookie|iubenda|gravatar|criteo|pubmatic|smartadserver|lijit|inmobi|onetag|clvrads|betweendigital|sparteo|adnxs|rubiconproject|openx|amazon-adsystem|taboola|outbrain|teads|seedtag|3lift|casalemedia|adform|yieldlab|quantserve|scorecardresearch|moatads|weborama|streamrail|ogury|adsafeprotected|doubleverify|smartclip|spotx|teads|justpremium|richaudience|improvedigital|sharethrough|(^|\/)(usync|user_sync|user-sync|syncframe|csync|sync)\b|prebid|beacon|\/ads?\//i;
 
-const SB = String(process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "").replace(/\/rest(\/v1)?$/, "");
-const KEY = String(process.env.SUPABASE_SERVICE_KEY || "").trim();
-if (!SB || !KEY){ console.error("mancano SUPABASE_URL e SUPABASE_SERVICE_KEY"); process.exit(1); }
-const H = { apikey: KEY, authorization: "Bearer " + KEY, "content-type": "application/json" };
-const UA = "KITEGO-Lente/1.0 (+https://kitego.it; legge le pagine delle scuole col loro permesso)";
-
-const MS = 1.943844;
-const aKn = (v, u) => u === "ms" ? v * MS : u === "kmh" ? v / 1.852 : u === "mph" ? v * 0.868976 : v;
-const unitaDa = s => { s = String(s || "").toLowerCase(); return /km\/?h/.test(s) ? "kmh" : /m\/?s/.test(s) ? "ms" : /mph/.test(s) ? "mph" : /kn|kt|nod/.test(s) ? "kn" : null; };
-
-/* ---------- robots.txt: la regola piu' semplice, applicata con prudenza ---------- */
-async function robotsPermette(url){
-  try{
-    const u = new URL(url);
-    const r = await fetch(u.origin + "/robots.txt", { headers: { "user-agent": UA }, signal: AbortSignal.timeout(6000) });
-    if (!r.ok) return { ok:true };
-    const t = await r.text();
-    let mio = false, tutti = false, disallow = [];
-    for (const riga of t.split(/\r?\n/)){
-      const l = riga.replace(/#.*/, "").trim(); if (!l) continue;
-      const m = l.match(/^([a-z-]+)\s*:\s*(.*)$/i); if (!m) continue;
-      const k = m[1].toLowerCase(), v = m[2].trim();
-      if (k === "user-agent"){ const ag = v.toLowerCase(); mio = ag === "*" || ag.includes("kitego"); tutti = ag === "*"; }
-      else if (k === "disallow" && (mio || tutti) && v) disallow.push(v);
-    }
-    const path = u.pathname + u.search;
-    const vietato = disallow.some(d => d === "/" || path.startsWith(d.replace(/\*.*$/, "")));
-    return vietato ? { ok:false, motivo:"robots.txt della pagina vieta i lettori automatici: serve che la scuola lo permetta o dia i dati in altro modo" } : { ok:true };
-  }catch(e){ return { ok:true }; }
-}
-
-/* ---------- le foglie di un JSON, con il loro percorso ---------- */
-function foglie(obj, via = "", out = [], prof = 0){
-  if (prof > 7 || out.length > 4000) return out;
-  if (Array.isArray(obj)){ const i = obj.length - 1; if (i >= 0) foglie(obj[i], via + "[" + i + "]", out, prof + 1); return out; }
-  if (obj && typeof obj === "object"){
-    for (const k of Object.keys(obj)){
-      const v = obj[k], p = via ? via + "." + k : k;
-      if (v && typeof v === "object") foglie(v, p, out, prof + 1);
-      else out.push({ via: p, k, v, padre: obj });
-    }
-    return out;
-  }
-  return out;
-}
-const num = v => { if (typeof v === "number") return v; if (typeof v === "string"){ const m = v.replace(",", ".").match(/-?\d+(\.\d+)?/); return m ? +m[0] : null; } return null; };
-const nonMisura = via => /(_id|Id)$|setting|\bunit\b|units|config|option|threshold|alarm/i.test(via);
-
-/* ECOWITT: i campi si chiamano "windspeedmph" qualunque unita' mostrino. L'unita'
-   vera sta in setting/info -> unit_setting_info.windspeed_id (25/9, Siponto:
-   la pagina diceva 5,6 nodi, la Lente 4,9 perche' convertiva da miglia). */
-const ECOWITT_UNITA = { 6:"kmh", 7:"ms", 8:"kn", 9:"mph" };
-function ventoDaJson(d, eco = {}){
-  try{ const id = d && d.data && d.data.unit_setting_info && d.data.unit_setting_info.windspeed_id;
-       if (id != null && ECOWITT_UNITA[+id]) eco.unita = ECOWITT_UNITA[+id]; }catch(e){}
-  const F = foglie(d).filter(f => num(f.v) != null);
-  const k = f => f.via.toLowerCase();
-  const vento = F.find(f => /(wind|vento)[^.]*(speed|avg|media|vel|kn|kt|ms|kmh)|windspeed|wspd|wind_?kn|vel_?vento/.test(k(f)) && !/gust|raffic|max|dir|min/.test(k(f)) && !nonMisura(f.via))
-    || F.find(f => /(^|\.)(wind|vento)(\.value|\.val)?$/.test(k(f)) && !nonMisura(f.via))
-    || F.find(f => /(wind|vento)\.[^.]*(speed|avg|media|value)/.test(k(f)) && !/gust|raffic|max|dir|min/.test(k(f)) && !nonMisura(f.via));
-  if (!vento) return null;
-  const raffica = F.find(f => /gust|raffic|wgust|wind_?max|maxwind/.test(k(f)) && !/dir/.test(k(f)) && !nonMisura(f.via));
-  const dir = F.find(f => /(wind_?|vento_?)?(dir|direction|direzione)(\.value)?$|wdir|winddir|bearing/.test(k(f)) && num(f.v) >= 0 && num(f.v) <= 360 && !nonMisura(f.via));
-  /* l'unita': accanto al valore ("unit": "km/h") o nel nome del campo */
-  const uAccanto = vento.padre && typeof vento.padre === "object" ? unitaDa(vento.padre.unit || vento.padre.units || vento.padre.unita) : null;
-  const ecoNome = /windspeedmph|windgustmph/i.test(vento.via);
-  const uNome = ecoNome ? null : unitaDa(vento.k);   /* per Ecowitt il nome mente */
-  return { campo: vento.via, vento: num(vento.v), raffica: raffica ? num(raffica.v) : null, dir: dir ? Math.round(num(dir.v)) : null,
-           unita: uAccanto || (ecoNome ? eco.unita : null) || uNome || null };
-}
-
-/* ---------- il testo della pagina, se i dati non bastano ---------- */
-function ventoDaTesto(t){
-  const s = String(t || "").replace(/\s+/g, " ");
-  /* "11/11 kn", "media / raffica 11/13 kn" (Meteo Grado, 26/9): media e raffica insieme */
-  const mr = s.match(/(\d{1,2}(?:[.,]\d)?)\s*\/\s*(\d{1,2}(?:[.,]\d)?)\s*(kn|kts?|nodi|km\/?h|m\/?s|mph)\b/i);
-  if (mr){
-    const g = s.match(/(?:tendenza|direzione|direction|dir)[^0-9]{0,30}\((\d{1,3})\s*[°o]\)|(\d{1,3})\s*°/i);
-    return { campo:"testo della pagina (media/raffica)", vento: +mr[1].replace(",", "."), raffica: +mr[2].replace(",", "."), dir: g ? +(g[1] || g[2]) : null, unita: unitaDa(mr[3]) || "kn" };
-  }
-  const m = s.match(/(?:vento|wind|speed|velocit[aà])[^0-9]{0,40}(\d{1,2}(?:[.,]\d)?)\s*(kn|kts?|nodi|km\/?h|m\/?s|mph)\b/i)
-    || s.match(/(\d{1,2}(?:[.,]\d)?)\s*(kn|kts|nodi)\b/i);
-  if (!m) return null;
-  const g = s.match(/(?:raffic[ae]|gust)[^0-9]{0,30}(\d{1,2}(?:[.,]\d)?)/i);
-  return { campo:"testo della pagina", vento: +m[1].replace(",", "."), raffica: g ? +g[1].replace(",", ".") : null, dir: null, unita: unitaDa(m[2]) || "kn" };
-}
-
-async function leggiPagina(browser, st){
-  const c = st.config || {}, url = c.url || st.link;
-  if (!/^https?:\/\//.test(url || "")) return { errore:"manca l'indirizzo della pagina" };
-  const rb = await robotsPermette(url); if (!rb.ok) return { errore: rb.motivo };
-  /* Si presenta come un Chrome normale: alcuni siti, davanti a un browser
-     "automatico", non caricano i dati. La firma KITEGO resta nel registro. */
-  const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 }, locale: "it-IT",
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" });
-  const page = await ctx.newPage();
-  const risposte = [], viste = [];
-  page.on("response", async r => {
-    try{
-      const tipo = r.request().resourceType(), ct = (r.headers()["content-type"] || "").split(";")[0];
-      if (!["xhr", "fetch", "document", "script", "other"].includes(tipo)) return;
-      let testo = null; try{ testo = await r.text(); }catch(e){}
-      const n = testo ? testo.length : 0;
-      if (tipo === "xhr" || tipo === "fetch") viste.push(`${tipo} ${ct} ${n}b ${(()=>{ try{ const x = new URL(r.url()); return x.origin + x.pathname; }catch(e){ return "?"; } })()}`);
-      if (!testo || n > 800000) return;
-      /* qualunque etichetta abbia, se il corpo e' JSON si legge */
-      const t = testo.trim(); if (!/^[{[]/.test(t)) return;
-      try{ risposte.push({ url: r.url(), d: JSON.parse(t) }); }catch(e){}
-    }catch(e){}
+  /* 1. i riquadri che ci sono adesso (anche quelli creati dopo l'apertura) */
+  document.querySelectorAll("iframe").forEach(f => {
+    const s = f.src || f.getAttribute("data-src") || "";
+    if (/^https?:/i.test(s) && !NO.test(s) && s.split("#")[0] !== location.href.split("#")[0]) add(T.player, s);
   });
-  let esito = null;
-  try{
-    const eco = { unita: null };   /* l'unita' Ecowitt di QUESTA pagina (tre pagine in parallelo) */
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    /* IL BANNER DEI COOKIE (Resia, 25/9): la pagina resta ferma su "scelte di
-       consenso" e i dati non partono. Si preme il tasto di consenso, se c'e'. */
-    const consenso = async () => {
-      for (const t of ["Accetta tutto", "Accetta tutti", "Accetta", "Accept all", "Accept", "Consenti tutti", "Consenti", "OK", "Ho capito", "Chiudi"]){
-        try{ const b = page.getByRole("button", { name: t, exact: false }).first(); if (await b.isVisible({ timeout: 800 })){ await b.click({ timeout: 2000 }); await page.waitForTimeout(1500); return t; } }catch(e){}
-      }
-      return null;
-    };
-    const premuto = await consenso();
-    if (premuto) console.log(`    premuto il consenso: "${premuto}"`);
-    /* LA PAGINA CHIEDE I NUMERI IN PIU' TEMPI (Ecowitt: prima le impostazioni,
-       poi i dati). Si aspetta fino a 30 secondi, e ci si ferma appena una
-       risposta ha dentro il vento. Primo giro vero (25/9, Siponto): con 6
-       secondi fissi si vedeva una risposta sola, senza vento. */
-    const limite = Date.now() + Math.min(45000, 30000 + (+c.attesa_ms || 0));
-    const trova = () => { for (const r of risposte.slice().reverse()){ const v = ventoDaJson(r.d, eco); if (v && v.vento != null) return { ...v, fonte: r.url }; } return null; };
-    while (Date.now() < limite){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
-    const senzaCodici = u => { try{ const x = new URL(u); return x.origin + x.pathname; }catch(e){ return String(u).slice(0, 80); } };
-    console.log(`    risposte dati lette (${risposte.length}): ${[...new Set(risposte.map(r => senzaCodici(r.url)))].slice(0, 12).join(" | ") || "nessuna"}`);
-    console.log(`    richieste della pagina (${viste.length}):\n      ${viste.slice(0, 25).join("\n      ") || "nessuna"}`);
-    if (!esito){ const testo = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 400) : ""); console.log(`    inizio del testo della pagina: ${JSON.stringify(testo)}`); }
-    /* LA HOME NON E' LA STAZIONE (Alghero, 25/9): zero richieste, ma nel menu
-       c'e' "STAZIONE METEO". Si segue quel link, una volta, e si riprova. */
-    if (!esito && !viste.length){
-      const link = await page.evaluate(() => { const L = [...document.querySelectorAll("a[href]")];
-        const t = L.find(a => /stazione\s*meteo|meteo\s*live|vento\s*(live|in diretta|reale)|live\s*wind|webcam/i.test(a.textContent || "") || /meteo|wind|webcam|stazione/i.test(a.getAttribute("href") || ""));
-        return t ? t.href : null; });
-      if (link && link !== url){
-        console.log(`    seguo il link della stazione: ${link}`);
-        await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-        await consenso();
-        const limite2 = Date.now() + 25000;
-        while (Date.now() < limite2){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
-        if (esito) esito.fonte = esito.fonte || link;
-        if (!esito){ const t2 = await page.evaluate(() => document.body ? document.body.innerText : ""); const v2 = ventoDaTesto(t2); if (v2) esito = { ...v2, fonte: link }; }
-      }
-    }
-    if (!esito){
-      const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
-      const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
-    }
-    if (eco.unita) console.log(`    unita' Ecowitt dalla pagina: ${eco.unita}`);
-    if (!esito) return { errore:"la pagina si apre, ma dentro non trovo il vento (" + risposte.length + " risposte dati viste)" };
-    const unita = c.unita || esito.unita || "kn";
-    const kn = +aKn(esito.vento, unita).toFixed(1);
-    if (!(kn >= 0 && kn <= 100)) return { errore:"vento letto " + kn + " kn: qualcosa non torna nell'unita' (" + unita + ")" };
-    return { kn, raffica_kn: esito.raffica != null ? +aKn(esito.raffica, unita).toFixed(1) : null, dir: esito.dir, campo: esito.campo, fonte: esito.fonte, unita };
-  }catch(e){ return { errore: String(e && e.message || e).slice(0, 160) }; }
-  finally{ await ctx.close().catch(() => {}); }
-}
+  /* 2. i video della pagina */
+  document.querySelectorAll("video, video source").forEach(v => { const s = v.currentSrc || v.src || ""; if (/^https?:/i.test(s)) add(T.video, s); });
 
-async function main(){
-  /* si leggono TUTTE le pagine affidate, accese o spente: leggere non pubblica
-     niente, e' l'interruttore "accesa" (Plancia) che decide cosa vede l'utente.
-     Cosi' una pagina appena affidata si prova prima di accenderla. */
-  /* OGNI 20 MINUTI, MA CON GIUDIZIO (26/9): allo scoccare dell'ora si leggono
-     tutte le pagine (anche le spente: servono alla taratura, una volta l'ora
-     basta); negli altri giri solo le ACCESE, quelle che gli utenti vedono,
-     cosi' il "misurato adesso" non e' mai piu' vecchio di 20 minuti. */
-  /* un giro lanciato a mano (Run workflow) e' sempre pieno: chi lo lancia vuole vedere tutto */
-  const giroPieno = process.env.GITHUB_EVENT_NAME === "workflow_dispatch" || new Date().getUTCMinutes() < 15;
-  const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config,attiva&tipo=eq.pagina${giroPieno ? "" : "&attiva=is.true"}`, { headers: H });
-  if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
-  const righe = await r.json();
-  console.log(`Lente automatica: ${righe.length} pagine da leggere (${giroPieno ? "giro pieno, anche le spente" : "giro leggero, solo le accese"})`);
-  if (!righe.length) return;
-  const browser = await chromium.launch();
-  const ora = new Date().toISOString();
-  let ok = 0;
-  /* TRE PAGINE ALLA VOLTA (26/9): con 18 pagine, una dopo l'altra, il giro
-     superava i 12 minuti e GitHub lo fermava a meta' (le prime lette, le
-     altre "non e' ancora passata"). Tre contesti separati nel browser: ogni
-     pagina ha le sue risposte, nessuna vede quelle delle altre. */
-  let i = 0;
-  const uno = async () => { while (i < righe.length){ const st = righe[i++]; await leggiUna(st); } };
-  const leggiUna = async st => {
-    const e = await leggiPagina(browser, st);
-    const riga = { spot_id: st.spot_id, letta: ora, quando: e.errore ? null : ora, kn: e.kn ?? null, raffica_kn: e.raffica_kn ?? null, dir: e.dir ?? null,
-                   fonte: e.fonte || null, campo: e.campo || null, unita: e.unita || null, errore: e.errore || null };
-    if (e.errore) console.log(`  ✗ ${st.spot_id}: ${e.errore}`); else { ok++; console.log(`  ✓ ${st.spot_id}: ${e.kn} kn${e.raffica_kn != null ? " (raffica " + e.raffica_kn + ")" : ""} da ${e.campo}`); }
-    /* l'ultima lettura buona non si cancella con un errore: si aggiorna solo lo stato */
-    const corpo = e.errore ? { spot_id: st.spot_id, letta: ora, errore: e.errore } : riga;
-    const w = await fetch(`${SB}/rest/v1/pagina_letture?on_conflict=spot_id`, { method:"POST", headers: { ...H, Prefer:"resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(corpo) });
-    if (!w.ok) console.log(`    (non salvata: Supabase ${w.status} ${(await w.text()).slice(0, 120)})`);
+  /* 3. quello che la pagina ha caricato */
+  const ris = performance.getEntriesByType("resource").map(e => ({ u: e.name, t: e.initiatorType }));
+  const volte = {};
+  ris.forEach(({ u }) => { try { const p = new URL(u); volte[p.origin + p.pathname] = (volte[p.origin + p.pathname] || 0) + 1; } catch (e) {} });
+  ris.forEach(({ u, t }) => {
+    if (NO.test(u)) return;
+    /* i flussi: la playlist (.m3u8/.mpd) o il flusso mjpeg, non i pezzetti .ts che arrivano ogni due secondi */
+    if (/\.ts(\?|$)|\.m4s(\?|$)/i.test(u)) return;
+    if (/\.m3u8|\.mpd|\.mjpe?g|videostream|mjpg/i.test(u)) add(T.video, u);
+    else if (/\.(jpe?g|png|webp)(\?|$)/i.test(u)) {
+      let p; try { p = new URL(u); } catch (e) { return; }
+      const siAggiorna = (volte[p.origin + p.pathname] || 0) > 1;
+      if (siAggiorna || /snapshot|cgi-bin|ISAPI|webcam|\bcam[_-]?\d|[?&](t|ts|time|_|v)=\d{6,}/i.test(u)) add(T.immagini, u);
+    }
+    if (/ecowitt\.net\/home\/share|holfuy\.com|weatherlink\.com|windguru\.cz\/station|wunderground\.com\/dashboard\/pws|weathercloud\.net|meteonetwork|api\.weather\.com\/v2\/pws/i.test(u)) add(T.stazioni, u);
+    if (t === "fetch" || t === "xmlhttprequest") add(T.dati, u);
+  });
+  document.querySelectorAll("a[href]").forEach(a => {
+    if (/ecowitt\.net\/home\/share|holfuy\.com\/(en|it|de|fr|es)\/weather|weatherlink\.com\/embeddablePage|windguru\.cz\/station|wunderground\.com\/dashboard\/pws|weathercloud\.net\/(it\/)?d\d/i.test(a.href)) add(T.stazioni, a.href);
+  });
+
+  /* 4. nei dati c'e' il vento? si prende l'ultimo valore di ogni elenco (il piu' recente) */
+  const cerca = o => {
+    const foglie = [];
+    const giro = (x, via, d) => {
+      if (d > 7 || x == null) return;
+      if (Array.isArray(x)) { if (x.length) giro(x[x.length - 1], (via ? via + "." : "") + "-1", d + 1); return; }
+      if (typeof x === "object") { Object.keys(x).slice(0, 120).forEach(k => giro(x[k], via ? via + "." + k : k, d + 1)); return; }
+      const n = typeof x === "number" ? x : (typeof x === "string" && /^-?\d+([.,]\d+)?$/.test(x.trim()) ? +x.replace(",", ".") : null);
+      if (n !== null && Number.isFinite(n)) foglie.push({ via, n });
+    };
+    giro(o, "", 0);
+    const k = f => f.via.toLowerCase();
+    const vento = foglie.find(f => /(wind|vento)[^.]*(speed|avg|media|vel|kn|kt|ms|kmh)|windspeed|wspd|wind_?kn|vel_?vento/.test(k(f)) && !/gust|raffic|max|dir/.test(k(f)))
+      || foglie.find(f => /(^|\.)(wind|vento)(\.value|\.val)?$/.test(k(f)))
+      || foglie.find(f => /(wind|vento)\.[^.]*(speed|avg|media|value)/.test(k(f)) && !/gust|raffic|max|dir/.test(k(f)));
+    if (!vento) return null;
+    /* 55.519: prima la raffica "di adesso"; il massimo del giorno solo se non c'e' altro */
+    const eRaff = f => /gust|raffic|wgust|wind_?max|maxwind/.test(k(f)) && !/dir/.test(k(f));
+    const raffica = foglie.find(f => eRaff(f) && !/max|day|daily|today|giorn|oggi|hi(gh)?_?|record/.test(k(f)))
+      || foglie.find(f => eRaff(f) && !/day|daily|today|giorn|oggi|record/.test(k(f)));
+    const dir = foglie.find(f => /(wind_?|vento_?)?(dir|direction|direzione)(\.value)?$|wdir|winddir|bearing/.test(k(f)) && f.n >= 0 && f.n <= 360);
+    const u = k(vento);
+    const unita = /mph/.test(u) ? "mph" : /kmh|km_h|kph|km\/h/.test(u) ? "kmh" : /(^|[._])ms$|m_s|mps|m\/s/.test(u) ? "ms" : /kn|kt|knot|nodi/.test(u) ? "kn" : "";
+    return { campo_vento: vento.via, vento: vento.n, campo_raffica: raffica ? raffica.via : "", raffica: raffica ? raffica.n : null,
+      campo_dir: dir ? dir.via : "", dir: dir ? dir.n : null, unita };
   };
-  await Promise.all([uno(), uno(), uno()]);
-  await browser.close();
-  console.log(`fatto: ${ok} su ${righe.length}`);
-}
-main().catch(e => { console.error(e); process.exit(1); });
+  for (const u of T.dati.slice(0, 20)) {
+    try {
+      const r = await fetch(u, { credentials: "omit" }); if (!r.ok) continue;
+      const t = await r.text(); let j; try { j = JSON.parse(t); } catch (e) { continue; }
+      const c = cerca(j); if (c) T.ricette.push({ url: u, ...c });
+    } catch (e) {}
+  }
+  delete T.dati;   /* gli indirizzi senza vento non servono a KITEGO */
+  /* della stessa immagine che si aggiorna basta l'ultimo indirizzo */
+  const ultime = {}; T.immagini.forEach(u => { try { const p = new URL(u); ultime[p.origin + p.pathname] = u; } catch (e) {} });
+  T.immagini = Object.values(ultime);
+
+  /* 5. il pannello */
+  const esc = s => String(s).replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+  const corto = u => { try { const p = new URL(u); return p.host + (p.pathname.length > 38 ? p.pathname.slice(0, 36) + "\u2026" : p.pathname); } catch (e) { return String(u).slice(0, 50); } };
+  const sez = (tit, arr, fmt) => arr.length ? `<div style="margin-top:12px"><div style="font:600 11px/1 system-ui,sans-serif;letter-spacing:.12em;color:#8F9BA1">${tit}</div>${arr.map(fmt).join("")}</div>` : "";
+  const riga = u => `<div style="margin-top:6px;font:13px/1.35 system-ui,sans-serif;color:#F2EFE9;word-break:break-all">${esc(corto(u))}</div>`;
+  const nTot = T.player.length + T.immagini.length + T.video.length + T.stazioni.length + T.ricette.length;
+  const box = document.createElement("div");
+  window.__kitegoLente = box;
+  box.setAttribute("style", "position:fixed;z-index:2147483647;top:16px;right:16px;width:360px;max-width:calc(100vw - 32px);max-height:80vh;overflow:auto;background:#0A1014;color:#F2EFE9;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45),inset 0 0 0 1px #243038;padding:16px 16px 14px;font:14px/1.4 system-ui,-apple-system,sans-serif");
+  box.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><b style="font:800 17px/1 system-ui,sans-serif;letter-spacing:-.3px">KITEGO</b><span style="font:600 12px/1 system-ui,sans-serif;color:#3FD8F5">Lente</span>
+      <button id="kgLChiudi" style="margin-left:auto;background:none;border:0;color:#8F9BA1;font-size:20px;cursor:pointer">\u00d7</button></div>
+    <div style="margin-top:6px;font-size:13px;color:#A2ACB1">${nTot ? "Ecco cosa ha caricato questa pagina." : "Non ho trovato niente. Aspetta che video e numeri compaiano, poi premi di nuovo la Lente."}</div>
+    ${sez("PLAYER", T.player, riga)}${sez("VIDEO", T.video, riga)}${sez("IMMAGINI CHE SI AGGIORNANO", T.immagini, riga)}${sez("CENTRALINE", T.stazioni, riga)}
+    ${sez("DATI DEL VENTO", T.ricette, r => `<div style="margin-top:6px;font:13px/1.4 system-ui,sans-serif">${esc(corto(r.url))}<br><span style="color:#22E39E">vento ${esc(r.vento)}${r.raffica != null ? " \u00b7 raffica " + esc(r.raffica) : ""}${r.dir != null ? " \u00b7 da " + esc(r.dir) + "\u00b0" : ""}</span> <span style="color:#8F9BA1">${r.unita ? "(" + r.unita + ")" : "(unit\u00e0 da scegliere)"}</span></div>`)}
+    ${nTot ? `<button id="kgLCopia" style="margin-top:14px;width:100%;padding:11px;border:0;border-radius:999px;background:#3FD8F5;color:#0A1014;font:700 14px system-ui,sans-serif;cursor:pointer">Copia per KITEGO</button>
+    <div id="kgLEsito" style="margin-top:8px;font-size:12.5px;color:#8F9BA1">Poi incollalo nella scheda dello spot, in \u00abLente\u00bb.</div>` : ""}`;
+  document.body.appendChild(box);
+  box.querySelector("#kgLChiudi").onclick = () => box.remove();
+  const b = box.querySelector("#kgLCopia");
+  if (b) b.onclick = async () => {
+    const testo = JSON.stringify(T);
+    let ok = false;
+    try { await navigator.clipboard.writeText(testo); ok = true; } catch (e) {
+      const ta = document.createElement("textarea"); ta.value = testo; box.appendChild(ta); ta.select();
+      try { ok = document.execCommand("copy"); } catch (_) {} ta.remove();
+    }
+    box.querySelector("#kgLEsito").textContent = ok ? "Copiato \u2713 Ora incollalo nella scheda dello spot, in \u00abLente\u00bb." : "Non riesco a copiare: seleziona questo testo e copialo a mano.";
+    if (!ok) { const ta = document.createElement("textarea"); ta.value = testo; ta.style.cssText = "width:100%;height:90px;margin-top:8px"; box.appendChild(ta); ta.select(); }
+  };
+})();
