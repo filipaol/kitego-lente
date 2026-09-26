@@ -1,0 +1,14 @@
+name: Scova le sezioni LNI
+on:
+  workflow_dispatch:
+jobs:
+  scova:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cerco i siti delle sezioni
+        run: node scova.mjs
