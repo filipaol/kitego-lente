@@ -194,7 +194,8 @@ async function main(){
      tutte le pagine (anche le spente: servono alla taratura, una volta l'ora
      basta); negli altri giri solo le ACCESE, quelle che gli utenti vedono,
      cosi' il "misurato adesso" non e' mai piu' vecchio di 20 minuti. */
-  const giroPieno = new Date().getUTCMinutes() < 15;
+  /* un giro lanciato a mano (Run workflow) e' sempre pieno: chi lo lancia vuole vedere tutto */
+  const giroPieno = process.env.GITHUB_EVENT_NAME === "workflow_dispatch" || new Date().getUTCMinutes() < 15;
   const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config,attiva&tipo=eq.pagina${giroPieno ? "" : "&attiva=is.true"}`, { headers: H });
   if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
   const righe = await r.json();
