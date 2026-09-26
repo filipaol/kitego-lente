@@ -115,7 +115,10 @@ function ventoDaTesto(t){
     const prima = s.slice(Math.max(0, x.index - 25), x.index + x[0].length);
     if (!/oggi|today|giorn|daily|record|60\s*min|ora\b|hour/i.test(prima)){ g = x; break; }
   }
-  return { campo: breve ? "testo della pagina (max 15 min)" : "testo della pagina", vento: +m[1].replace(",", "."), raffica: g ? +g[1].replace(",", ".") : null, dir: null, unita: unitaDa(m[2]) || "kn" };
+  const RO = { N:0, NNE:22, NE:45, ENE:67, E:90, ESE:112, SE:135, SSE:157, S:180, SSW:202, SW:225, WSW:247, W:270, WNW:292, NW:315, NNW:337, O:270, SO:225, NO:315, OSO:247, ONO:292, SSO:202, NNO:337 };
+  const dg = s.match(/\bda\s*\**\s*(\d{1,3})\s*°/i), dl = s.match(/vento\s+da\s+\**\s*(N{1,2}E?|N{1,2}[WO]|E[NS]E|S{1,2}E|S{1,2}[WO]|[WO][NS][WO]|NE|NW|NO|SE|SW|SO|N|E|S|W|O)\b/i);
+  const dir = dg && +dg[1] <= 360 ? +dg[1] : dl ? RO[dl[1].toUpperCase()] ?? null : null;
+  return { campo: breve ? "testo della pagina (max 15 min)" : "testo della pagina", vento: +m[1].replace(",", "."), raffica: g ? +g[1].replace(",", ".") : null, dir, unita: unitaDa(m[2]) || "kn" };
 }
 
 async function leggiPagina(browser, st){
@@ -185,6 +188,29 @@ async function leggiPagina(browser, st){
     if (!esito){
       const testo = await page.evaluate(() => document.body ? document.body.innerText : "");
       const v = ventoDaTesto(testo); if (v) esito = { ...v, fonte: url };
+    }
+    /* 55.520 LA PAGINA DEL CIRCOLO E' SOLO LA CORNICE (LNI Napoli, Viareggio,
+       26/9): i numeri stanno su un altro sito, di solito quello della centralina
+       Davis (WeatherLink, Meteo System). Se nella pagina c'e' un link o un
+       riquadro verso uno di questi, si apre QUELLO, una volta sola. */
+    if (!esito){
+      const dati = await page.evaluate(() => {
+        const H = /weatherlink\.com\/(embeddablePage|bulletin)|meteosystem\.com\/wlip|meteo-system\.com\/wlip|meteonetwork\.it\/.*stazion|wunderground\.com\/dashboard\/pws|weathercloud\.net|windguru\.cz\/station|meteoregionelazio\.it\/rete\/stazione|holfuy\.com\/.*(station|widget)/i;
+        const U = [...document.querySelectorAll("a[href], iframe[src]")].map(e => e.href || e.src).filter(Boolean);
+        return U.find(u => H.test(u)) || null; });
+      if (dati && dati !== url){
+        console.log(`    la cornice rimanda ai dati: ${dati}`);
+        const rb2 = await robotsPermette(dati);
+        if (rb2.ok){
+          risposte.length = 0;
+          await page.goto(dati, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+          await consenso();
+          const limite3 = Date.now() + 25000;
+          while (Date.now() < limite3){ await page.waitForTimeout(1500); esito = trova(); if (esito) break; }
+          if (!esito){ const t3 = await page.evaluate(() => document.body ? document.body.innerText : ""); const v3 = ventoDaTesto(t3); if (v3) esito = { ...v3, fonte: dati }; }
+          if (esito){ esito.fonte = dati; esito.campo = (esito.campo || "") + " (via " + (() => { try{ return new URL(dati).hostname; }catch(e){ return "altro sito"; } })() + ")"; }
+        } else console.log(`    ma robots.txt non lo permette: ${rb2.motivo}`);
+      }
     }
     if (eco.unita) console.log(`    unita' Ecowitt dalla pagina: ${eco.unita}`);
     if (!esito) return { errore:"la pagina si apre, ma dentro non trovo il vento (" + risposte.length + " risposte dati viste)" };
