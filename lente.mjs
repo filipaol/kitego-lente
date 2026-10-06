@@ -239,7 +239,20 @@ async function main(){
   const r = await fetch(`${SB}/rest/v1/stazioni?select=spot_id,chi,link,config,attiva&tipo=eq.pagina${giroPieno ? "" : "&attiva=is.true"}`, { headers: H });
   if (!r.ok){ console.error("Supabase", r.status, await r.text()); process.exit(1); }
   const righe = await r.json();
-  console.log(`Lente automatica: ${righe.length} pagine da leggere (${giroPieno ? "giro pieno, anche le spente" : "giro leggero, solo le accese"})`);
+  /* 5/10/2026 I GIRI ANNULLATI. Le pagine affidate sono cresciute, e una pagina lenta puo' prendersi
+     anche tre minuti (apertura, consenso, attesa dei dati, link della stazione, cornice). Il giro
+     superava i 20 minuti fra un giro e l'altro e i 25 del limite: GitHub annullava (una mail ogni
+     20 minuti). Ora:
+     - prima le pagine lette da piu' tempo (mai lette in testa), cosi' nessuna resta indietro;
+     - ogni pagina ha al massimo 100 secondi;
+     - dopo 13 minuti non si apre piu' niente: le altre passano al giro dopo, che parte da loro. */
+  try{
+    const l = await fetch(`${SB}/rest/v1/pagina_letture?select=spot_id,letta`, { headers: H });
+    const L = l.ok ? await l.json() : [], quando = {};
+    (Array.isArray(L) ? L : []).forEach(x => { quando[x.spot_id] = Date.parse(x.letta) || 0; });
+    righe.sort((a, b) => (quando[a.spot_id] || 0) - (quando[b.spot_id] || 0));
+  }catch(e){ /* senza l'ordine si legge come prima */ }
+  console.log(`Lente automatica: ${righe.length} pagine da leggere (${giroPieno ? "giro pieno, anche le spente" : "giro leggero, solo le accese"}), prima le piu' vecchie`);
   if (!righe.length) return;
   const browser = await chromium.launch();
   const ora = new Date().toISOString();
@@ -249,9 +262,11 @@ async function main(){
      altre "non e' ancora passata"). Tre contesti separati nel browser: ogni
      pagina ha le sue risposte, nessuna vede quelle delle altre. */
   let i = 0;
-  const uno = async () => { while (i < righe.length){ const st = righe[i++]; await leggiUna(st); } };
+  const INIZIO = Date.now(), BUDGET = 13 * 60e3, PER_PAGINA = 100e3;
+  const uno = async () => { while (i < righe.length){ if (Date.now() - INIZIO > BUDGET) return; const st = righe[i++]; await leggiUna(st); } };
   const leggiUna = async st => {
-    const e = await leggiPagina(browser, st);
+    let ferma; const tetto = new Promise(res => { ferma = setTimeout(() => res({ errore: "la pagina ci mette troppo (oltre 100 secondi): la riprovo al prossimo giro" }), PER_PAGINA); });
+    const e = await Promise.race([leggiPagina(browser, st), tetto]); clearTimeout(ferma);
     const riga = { spot_id: st.spot_id, letta: ora, quando: e.errore ? null : ora, kn: e.kn ?? null, raffica_kn: e.raffica_kn ?? null, dir: e.dir ?? null,
                    fonte: e.fonte || null, campo: e.campo || null, unita: e.unita || null, errore: e.errore || null };
     if (e.errore) console.log(`  ✗ ${st.spot_id}: ${e.errore}`); else { ok++; console.log(`  ✓ ${st.spot_id}: ${e.kn} kn${e.raffica_kn != null ? " (raffica " + e.raffica_kn + ")" : ""} da ${e.campo}`); }
@@ -260,8 +275,11 @@ async function main(){
     const w = await fetch(`${SB}/rest/v1/pagina_letture?on_conflict=spot_id`, { method:"POST", headers: { ...H, Prefer:"resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(corpo) });
     if (!w.ok) console.log(`    (non salvata: Supabase ${w.status} ${(await w.text()).slice(0, 120)})`);
   };
-  await Promise.all([uno(), uno(), uno()]);
+  /* quattro alla volta: i runner GitHub dei repository pubblici hanno 4 processori */
+  await Promise.all([uno(), uno(), uno(), uno()]);
+  const rimaste = Math.max(0, righe.length - i);
   await browser.close();
-  console.log(`fatto: ${ok} su ${righe.length}`);
+  console.log(`fatto: ${ok} su ${righe.length}${rimaste ? ` · ${rimaste} rimandate al prossimo giro (tempo finito)` : ""} · ${Math.round((Date.now() - INIZIO) / 1000)} s`);
+  process.exit(0);   /* le pagine troppo lente lasciate a meta' non tengono acceso il giro */
 }
 main().catch(e => { console.error(e); process.exit(1); });
