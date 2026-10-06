@@ -8,13 +8,13 @@ concurrency:
   cancel-in-progress: false
 jobs:
   leggi:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 6/10: fisso. Dal 19 ottobre "ubuntu-latest" diventa Ubuntu 26, e il browser (Playwright 1.49) li' potrebbe non installarsi
     timeout-minutes: 19     # 5/10: sta dentro i 20 minuti fra un giro e l'altro (la lettura si ferma da sola a 13)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"   # 6/10: Node 20 e' a fine vita
       - name: Installo il browser
         run: |
           npm install --no-audit --no-fund
