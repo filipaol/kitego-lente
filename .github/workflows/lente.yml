@@ -9,7 +9,7 @@ concurrency:
 jobs:
   leggi:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 19     # 5/10: sta dentro i 20 minuti fra un giro e l'altro (la lettura si ferma da sola a 13)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,6 +20,8 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: Leggo le pagine delle scuole
+        timeout-minutes: 16
+        continue-on-error: true   # se una pagina blocca tutto, il giro chiude lo stesso: le pagine lette sono gia' salvate
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
